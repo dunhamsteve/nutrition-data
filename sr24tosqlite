@@ -1,0 +1,248 @@
+#!/usr/bin/python
+
+import re
+import zipfile
+import os, os.path, sqlite3
+from subprocess import Popen,PIPE
+
+
+rTABLEROW = r' *([A-Za-z_]+) +([AN]) *([0-9.]+)([*]?) +([YN]) +(.*)'
+# newer revisions have this format for a few of the table rows...
+rTABLEROW2 = r' *([A-Z][A-Za-z_.+0-9]+) +([AN]) *([0-9.]+)([*]?) +()(.*)'
+
+class Field(object):
+  """Describes a single column in a table"""
+  def __init__(self, name, typ, size, key, blank, desc):
+    self.name, self.typ, self.size, self.key, self.desc = name, typ, size, key, desc
+    
+  def __str__(self):
+    if self.typ == 'N':
+      parts = self.size.split('.')
+      if len(parts) == 2:
+        # For documentation, sqlite3 doesn't handle these.
+        sql_type = 'decimal(%s)' % (','.join(parts))
+      else:
+        sql_type = 'number'
+    elif self.typ == 'A':
+      sql_type = 'text'
+    else:
+      sql_type = ''
+    
+    desc = self.desc.replace('\n',' ')
+    
+    return '%s %s -- %s' % (self.name, sql_type, desc)
+
+class Table(object):
+  """Describes a table"""
+  def __init__(self, name, file):
+    self.name = name
+    self.file = file
+    self.fields = []
+    self.links = []
+    self.keys = []
+  
+  def __str__(self):
+    ff = "\n, ".join(str(r) for r in self.fields)
+    ddl = "create table %s (\n  %s\n);" % (self.file, ff)
+    return ddl
+    
+class Schema(object):
+  """Parses schema from PDF description and reads table data from zip file."""
+  def __init__(self, zipname):
+    self.tables = []
+    self.table = None
+    self.peeked = None
+    
+    self.zf = zipfile.ZipFile(zipname)
+    
+    proc = Popen(['/usr/bin/env','pdftotext','-layout','-','-'],stdin=PIPE,stdout=PIPE,stderr=PIPE)
+    sr24_doc, _ = proc.communicate(input=self.zf.read('sr24_doc.pdf'))
+    
+    self.data = iter(sr24_doc.splitlines())
+    
+    # Rob Pike style parser
+    state = self.start
+    try:
+      while state:
+        state = state()
+    except StopIteration:
+      pass
+  
+  def peek(self):
+    if not self.peeked:
+      self.peeked = self.next()
+    return self.peeked
+    
+  def next(self):
+    if self.peeked:
+      page,line = self.peeked
+      self.peeked = None
+      return page,line
+      
+    line = self.data.next()
+    if line and line[0] == '\x0c':
+      return True, line[1:]
+    return False, line
+    
+  def start(self):
+    page, line = self.next()
+    
+    # continued table
+    if page and 'field name' in line.lower():
+      return self.tablebody
+      
+    m = re.match(r'(.* file) \(file name = ([^ ]*)\).*',line, re.I)
+    if m:
+      self.table = Table(m.group(1),m.group(2))
+      self.tables.append(self.table)
+      return self.start
+    
+    m = re.match(r'.*Links to the (.* file) by (the )?([A-Za-z_]+).*',line, re.I)
+    if m:
+      self.table.links.append((m.group(1), m.group(3)))
+      return self.start
+      
+    m = re.match(r'Table [0-9]+[.].*File Format', line, re.I)
+    if m:
+      page, line = self.next()
+      if 'field name' in line.lower():
+        return self.tablebody
+      raise Exception("blah")
+      
+    return self.start
+  
+  def tablebody(self):
+    """Want to make sure we get everything"""
+    page, line = self.next()
+    if page:
+      print "PAGE",line
+      return self.tablebody
+    
+    if not line:
+      if re.match(rTABLEROW, self.peek()[1]):
+        return self.tablebody
+      return self.start
+    
+    # most tables end with a footnote
+    if line[0] == '*':
+      return self.start
+      
+    m = re.match(rTABLEROW, line)
+    if not m:
+      m = re.match(rTABLEROW2, line)
+      
+    if m:
+      row = list(m.groups())
+      row[0] = row[0].replace('.','').replace('+','_')
+      self.table.fields.append(Field(*row))
+      
+      return self.tablebody
+      
+    if re.match(r' {5,}.*', line):
+      self.table.fields[-1].desc += ' '+line.strip()
+      return self.tablebody
+      
+    print "FAIL", line
+    return self.start
+
+  def get_rows(self, table):
+    try:
+      f = t.file+".txt"
+      data = schema.zf.read(f)
+    except KeyError:
+      return None
+    
+    
+    # splits lines, then re-merges continuation lines
+    lines = []
+    prev = None
+    for line in data.splitlines():
+      # line = line.strip("\r\n")
+      if line and line[0] == '~':
+        if prev:
+          lines.append(prev)
+        prev = line
+      else:
+        prev += '\n'+line
+    lines.append(prev)
+
+    # load data
+    values = []
+
+    for line in lines:
+      def clean(x):
+        if x == "":
+          return None
+        if x[0] == "~":
+          return unicode(x[1:-1],'cp1251')
+        if "." in x:
+          return float(x)
+        if '/' in x:
+          return unicode(x)
+        try:
+          return int(x)
+        except ValueError:
+          return unicode(x)
+      row = map(clean, line.split('^'))
+
+      if len(row) != len(t.fields):
+        print fields
+        print row
+        raise Exception("length mismatch for %s -- expected %d columns got %d" % (t.name, len(row), len(t.fields)))
+      values.append(row)
+    return values
+    
+# These three functions generate DDL for a table
+
+dbfile = 'sr24.sqlite'
+
+if os.path.exists(dbfile):
+  os.unlink(dbfile)
+
+conn = sqlite3.connect(dbfile)
+c = conn.cursor()
+
+
+
+if not os.path.exists('sr24.zip'):
+  print 'sr24.zip is missing'
+  print 'wget http://www.ars.usda.gov/SP2UserFiles/Place/12354500/Data/SR24/dnload/sr24.zip'
+  exit()
+
+print "Reading schema... (this requires pdftotext)"
+
+schema = Schema('sr24.zip')
+
+print "loading tables...\n"
+for t in schema.tables:
+  fields = [ field.name for field in t.fields]
+  values = schema.get_rows(t)
+  if values is None:
+    print "%s '%s' -- Skipped, not in zip file" % (t.file, t.name)
+    continue
+  
+  # DDL
+  c.execute(str(t))
+
+  # Insert
+  r = c.executemany("insert into %s values (%s)" % (t.file,",".join('?' for f in fields)), values)
+  print "%s '%s' -- %d rows" % (t.file, t.name, r.rowcount)
+
+# add a fts index.
+if True:
+  c.execute("create virtual table food using fts3()")
+  c.execute("insert into food (docid, content) select ndb_no, long_desc||' '||comname||' '||manufacname from food_des")
+  conn.commit()
+  c.close()
+
+
+# This query cleans out some data I don't particularly care about.
+"""
+create table todo as select ndb_no from food_des where fdgrp_Cd in ('2500','3600','2200','0800') or manufacname != '';
+delete from food_des where ndb_no in (select ndb_no from todo);
+delete from nut_data where ndb_no in (select ndb_no from todo);
+delete from footnote where ndb_no in (select ndb_no from todo);
+delete from weight where ndb_no in (select ndb_no from todo);
+drop table todo
+"""
+
