@@ -55,10 +55,13 @@ class Schema(object):
     
     self.zf = zipfile.ZipFile(zipname)
     
-    proc = Popen(['/usr/bin/env','pdftotext','-layout','-','-'],stdin=PIPE,stdout=PIPE,stderr=PIPE)
-    sr24_doc, _ = proc.communicate(input=self.zf.read('sr24_doc.pdf'))
+    pdfname ,= [ info.filename for info in self.zf.filelist if info.filename.endswith('_doc.pdf')]
     
-    self.data = iter(sr24_doc.splitlines())
+    
+    proc = Popen(['/usr/bin/env','pdftotext','-layout','-','-'],stdin=PIPE,stdout=PIPE,stderr=PIPE)
+    pdftext, _ = proc.communicate(input=self.zf.read(pdfname))
+    
+    self.data = iter(pdftext.splitlines())
     
     # Rob Pike style parser
     state = self.start
@@ -107,7 +110,13 @@ class Schema(object):
       page, line = self.next()
       if 'field name' in line.lower():
         return self.tablebody
-      raise Exception("blah")
+
+      # label split across two lines... (p.32)
+      if 'name' in self.next()[1].lower():
+        return self.tablebody
+
+      print page,line
+      raise Exception("Expected 'field name'")
       
     return self.start
   
@@ -116,6 +125,9 @@ class Schema(object):
     page, line = self.next()
     if page:
       print "PAGE",line
+      if 'Field name' not in line.lower():
+        if 'name' not in self.next()[1].lower():
+          raise Exception("unexpected weirdness in table header continuation on page break")
       return self.tablebody
     
     if not line:
@@ -141,7 +153,7 @@ class Schema(object):
     if re.match(r' {5,}.*', line):
       self.table.fields[-1].desc += ' '+line.strip()
       return self.tablebody
-      
+    
     print "FAIL", line
     return self.start
 
@@ -194,7 +206,9 @@ class Schema(object):
     
 # These three functions generate DDL for a table
 
-dbfile = 'sr24.sqlite'
+version = 25
+
+dbfile = 'sr%d.sqlite' % version
 
 if os.path.exists(dbfile):
   os.unlink(dbfile)
@@ -203,15 +217,23 @@ conn = sqlite3.connect(dbfile)
 c = conn.cursor()
 
 
-
-if not os.path.exists('sr24.zip'):
-  print 'sr24.zip is missing'
-  print 'wget http://www.ars.usda.gov/SP2UserFiles/Place/12354500/Data/SR24/dnload/sr24.zip'
-  exit()
+src_file = 'sr%d.zip' % version
+url = 'http://www.ars.usda.gov/SP2UserFiles/Place/12354500/Data/SR%d/dnload/sr%d.zip' %(version,version)
+if not os.path.exists(src_file):
+  print src_file, 'is missing'
+  print "trying to fetch", url
+  
+  import requests
+  r = requests.get(url)
+  if r.status_code == 200:
+    open(src_file,'w').write(r.content)
+  else:
+    print "Failed", r.status_code, r.content
+    exit(-1)
 
 print "Reading schema... (this requires pdftotext)"
 
-schema = Schema('sr24.zip')
+schema = Schema(src_file)
 
 print "loading tables...\n"
 for t in schema.tables:
@@ -228,15 +250,16 @@ for t in schema.tables:
   r = c.executemany("insert into %s values (%s)" % (t.file,",".join('?' for f in fields)), values)
   print "%s '%s' -- %d rows" % (t.file, t.name, r.rowcount)
 
-# add a fts index.
-if True:
+# add a full text index.
+if False:
   c.execute("create virtual table food using fts3()")
   c.execute("insert into food (docid, content) select ndb_no, long_desc||' '||comname||' '||manufacname from food_des")
   conn.commit()
   c.close()
 
 
-# This query cleans out some data I don't particularly care about.
+# This query cleans out some data I personally don't need. commercial boxed food products, etc.  I just want
+# basic ingredients that appear in recipes.
 """
 create table todo as select ndb_no from food_des where fdgrp_Cd in ('2500','3600','2200','0800') or manufacname != '';
 delete from food_des where ndb_no in (select ndb_no from todo);
