@@ -125,7 +125,7 @@ class Schema(object):
     page, line = self.next()
     if page:
       print "PAGE",line
-      if 'Field name' not in line.lower():
+      if 'field name' not in line.lower():
         if 'name' not in self.next()[1].lower():
           raise Exception("unexpected weirdness in table header continuation on page break")
       return self.tablebody
@@ -206,7 +206,7 @@ class Schema(object):
     
 # These three functions generate DDL for a table
 
-version = 25
+version = 26
 
 dbfile = 'sr%d.sqlite' % version
 
