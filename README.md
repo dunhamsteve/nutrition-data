@@ -10,6 +10,10 @@ output of the documentation.
 To run this you will need the `requests` and `sqlite3` python modules and the 
 `pdftotext` executable.
 
+The resulting database uses text fields for `NDB_NO`, per the specification in the
+PDF file. If you don't need an exact match for the upstream identifiers, which
+have leading zeros, you could convert these fields to integers.
+
 
 [1]: http://www.ars.usda.gov/Services/docs.htm?docid=8964
 
