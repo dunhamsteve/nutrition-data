@@ -206,7 +206,7 @@ class Schema(object):
     
 # These three functions generate DDL for a table
 
-version = 26
+version = 27
 
 dbfile = 'sr%d.sqlite' % version
 
@@ -218,7 +218,7 @@ c = conn.cursor()
 
 
 src_file = 'sr%d.zip' % version
-url = 'http://www.ars.usda.gov/SP2UserFiles/Place/12354500/Data/SR%d/dnload/sr%d.zip' %(version,version)
+url = 'http://www.ars.usda.gov/SP2UserFiles/Place/12354500/Data/SR%d/dnload/sr%dasc.zip' %(version,version)
 if not os.path.exists(src_file):
   print src_file, 'is missing'
   print "trying to fetch", url
